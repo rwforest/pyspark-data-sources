@@ -173,8 +173,8 @@ class RestDataSource(DataSource):
         """Validate required options"""
         if "url" not in self.options:
             raise ValueError("Option 'url' is required for REST data source")
-        if "input" not in self.options and "inputData" not in self.options:
-            raise ValueError("Either 'input' (table name) or 'inputData' (serialized JSON) is required for REST data source")
+        if "input" not in self.options and "inputData" not in self.options and "inputCsvPath" not in self.options:
+            raise ValueError("Either 'input' (table name), 'inputData' (serialized JSON), or 'inputCsvPath' (CSV file path) is required for REST data source")
 
     def schema(self) -> str:
         """
@@ -201,6 +201,7 @@ class RestReader(DataSourceReader):
         self.url = options["url"]
         self.input_table = options.get("input", "")  # Table name (optional if inputData provided)
         self.input_data_json = options.get("inputData", "")  # Serialized JSON data (optional if input provided)
+        self.input_csv_path = options.get("inputCsvPath", "")  # CSV file path (optional alternative)
 
         if self.input_table:
             warnings.warn(
@@ -242,12 +243,24 @@ class RestReader(DataSourceReader):
         """
         import json
 
-        # Load input data - either from serialized JSON or from Spark table
+        # Load input data - from JSON, CSV, or Spark table
         if self.input_data_json:
             # Use pre-serialized input data
             all_input_data = json.loads(self.input_data_json)
             if all_input_data:
                 self.column_names = list(all_input_data[0].keys())
+        elif self.input_csv_path:
+            # Read from CSV file (works in all environments!)
+            import csv
+            all_input_data = []
+            try:
+                with open(self.input_csv_path, 'r') as csvfile:
+                    reader = csv.DictReader(csvfile)
+                    self.column_names = reader.fieldnames or []
+                    for row in reader:
+                        all_input_data.append(row)
+            except Exception as e:
+                raise RuntimeError(f"Failed to read CSV file '{self.input_csv_path}': {e}")
         elif self.input_table:
             # Load from Spark table (requires Spark session access)
             from pyspark.sql import SparkSession
@@ -255,10 +268,20 @@ class RestReader(DataSourceReader):
             spark = SparkSession.getActiveSession()
             if spark is None:
                 raise RuntimeError(
-                    "Failed to get active Spark session. The 'input' option is not reliable "
-                    "in some environments like Databricks because the data source may not have "
-                    "access to the session. Please use the 'inputData' option instead to pass "
-                    "your input data as a JSON string."
+                    "\n" + "="*70 + "\n"
+                    "ERROR: The 'input' table option does NOT work in Databricks.\n\n"
+                    "The Python Data Source API in Databricks/PySpark 4.0 does not provide\n"
+                    "access to the Spark session in the partitions() method, so reading\n"
+                    "from temporary tables is not possible.\n\n"
+                    "SOLUTION: Use the rest_api_call() helper function instead:\n\n"
+                    "   from pyspark_datasources import rest_api_call\n\n"
+                    "   result_df = rest_api_call(\n"
+                    "       input_df,  # Pass your DataFrame directly\n"
+                    "       url='https://api.example.com/endpoint',\n"
+                    "       method='POST'\n"
+                    "   )\n\n"
+                    "This helper function handles all the complexity for you!\n"
+                    + "="*70
                 )
 
             # Get input data from the temporary table

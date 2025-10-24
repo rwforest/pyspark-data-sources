@@ -60,6 +60,7 @@ query = stream.writeStream.format("console").start()
 | `github` | Batch | Read GitHub pull requests | Built-in |
 | `googlesheets` | Batch | Read public Google Sheets | Built-in |
 | `huggingface` | Batch | Load Hugging Face datasets | `[huggingface]` |
+| `rest` | Batch | Call REST APIs in parallel for multiple parameter sets | Built-in |
 | `stock` | Batch | Fetch stock market data (Alpha Vantage) | Built-in |
 | `opensky` | Batch/Stream | Live flight tracking data | Built-in |
 | `kaggle` | Batch | Load Kaggle datasets | `[kaggle]` |
@@ -88,6 +89,34 @@ df.show(truncate=False)
 # |Christine Sampson |johnsonjeremy@example.com|Hernandez-Nguyen |
 # |Yolanda Brown     |williamlowe@example.net  |Miller-Hernandez |
 # +------------------+-------------------------+-----------------+
+```
+
+## Example: Call REST APIs in Parallel
+
+```python
+from pyspark_datasources import RestDataSource
+
+spark.dataSource.register(RestDataSource)
+
+# Create input parameters - each row will trigger one API call
+input_data = [
+    ("Nevada", "nn"),
+    ("Northern California", "pr"),
+    ("Virgin Islands region", "pr")
+]
+input_df = spark.createDataFrame(input_data, ["region", "source"])
+input_df.createOrReplaceTempView("input_params")
+
+# Call REST API for each input row in parallel
+df = spark.read.format("rest") \
+    .option("url", "https://soda.demo.socrata.com/resource/6yvf-kk3n.json") \
+    .option("input", "input_params") \
+    .option("method", "GET") \
+    .option("partitions", "3") \
+    .load()
+
+df.show()
+# Results include both input parameters and API responses
 ```
 
 ## Building Your Own Data Source
