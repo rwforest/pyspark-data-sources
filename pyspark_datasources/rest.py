@@ -188,6 +188,8 @@ class RestDataSource(DataSource):
         return RestReader(self.options, schema)
 
 
+import warnings
+
 class RestReader(DataSourceReader):
     """Reader implementation for REST API calls"""
 
@@ -199,6 +201,13 @@ class RestReader(DataSourceReader):
         self.url = options["url"]
         self.input_table = options.get("input", "")  # Table name (optional if inputData provided)
         self.input_data_json = options.get("inputData", "")  # Serialized JSON data (optional if input provided)
+
+        if self.input_table:
+            warnings.warn(
+                "The 'input' option is deprecated and may not work reliably in all environments. "
+                "It is recommended to use the 'inputData' option instead.",
+                DeprecationWarning
+            )
 
         # Optional options with defaults
         self.method = options.get("method", "POST").upper()
@@ -243,13 +252,13 @@ class RestReader(DataSourceReader):
             # Load from Spark table (requires Spark session access)
             from pyspark.sql import SparkSession
 
-            spark = SparkSession.builder.getOrCreate()
+            spark = SparkSession.getActiveSession()
             if spark is None:
                 raise RuntimeError(
-                    "Could not get or create a Spark session. "
-                    "When using 'input' option with table name, ensure the Spark session is available. "
-                    "Alternatively, use the 'inputData' option with pre-serialized JSON data, "
-                    "or use the rest_api_call() helper function."
+                    "Failed to get active Spark session. The 'input' option is not reliable "
+                    "in some environments like Databricks because the data source may not have "
+                    "access to the session. Please use the 'inputData' option instead to pass "
+                    "your input data as a JSON string."
                 )
 
             # Get input data from the temporary table
