@@ -1,0 +1,89 @@
+================================================================================
+REST DATA SOURCE - QUICK TEST GUIDE
+================================================================================
+
+The virtual environment is already set up with everything you need!
+
+================================================================================
+OPTION 1: Run All Tests (Easiest - 3 Commands)
+================================================================================
+
+cd /Users/yipman/Downloads/github/pyspark-data-sources
+source test_venv/bin/activate
+python3 test_rest_datasource.py
+
+That's it! You'll see all 7 tests pass.
+
+================================================================================
+OPTION 2: Use the Test Script (Even Easier - 1 Command)
+================================================================================
+
+cd /Users/yipman/Downloads/github/pyspark-data-sources
+./RUN_TESTS.sh
+
+The script automatically activates the environment and runs tests.
+
+================================================================================
+OPTION 3: Quick Import Test (Verify Installation)
+================================================================================
+
+cd /Users/yipman/Downloads/github/pyspark-data-sources
+source test_venv/bin/activate
+python3 -c "from pyspark_datasources import RestDataSource; print('✅ Working!')"
+
+================================================================================
+What You'll See When Tests Pass
+================================================================================
+
+✅ PASS: Import
+✅ PASS: Registration
+✅ PASS: Partitions Fix         ← This verifies the bug fix!
+✅ PASS: GET Request
+✅ PASS: POST Request
+✅ PASS: Multiple Partitions
+✅ PASS: Various Options
+
+TOTAL: 7/7 tests passed
+
+🎉 ALL TESTS PASSED! 🎉
+
+================================================================================
+Already Set Up For You
+================================================================================
+
+✓ Virtual environment created (test_venv/)
+✓ PySpark 4.0.1 installed
+✓ REST Data Source wheel installed
+✓ Test script ready (test_rest_datasource.py)
+✓ Everything configured and working
+
+================================================================================
+Files You Can Use
+================================================================================
+
+📄 HOW_TO_TEST.md           - Detailed testing guide
+📄 test_rest_datasource.py  - Comprehensive test suite
+📄 RUN_TESTS.sh            - Simple test runner script
+📄 examples/rest_example.py - Example usage code
+📄 TEST_RESULTS.md         - Previous test results
+
+================================================================================
+For More Information
+================================================================================
+
+Detailed guide:     cat HOW_TO_TEST.md
+Test results:       cat TEST_RESULTS.md
+Usage examples:     cat QUICK_START_WHEEL.md
+Build info:         cat WHEEL_BUILD_SUMMARY.md
+
+================================================================================
+Ready to Go!
+================================================================================
+
+Just run one of the options above. Everything is already installed and ready.
+
+The easiest way:
+  cd /Users/yipman/Downloads/github/pyspark-data-sources
+  ./RUN_TESTS.sh
+
+================================================================================
