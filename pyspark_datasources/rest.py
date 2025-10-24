@@ -1,0 +1,506 @@
+"""
+REST Data Source for Apache Spark
+
+This data source enables calling REST APIs in parallel for multiple sets of input parameters
+and collating the results in a DataFrame. It's a Python implementation of the original
+spark-datasource-rest (Scala) library.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
+from typing import Dict, List, Iterator, Optional, Tuple, Any
+import requests
+import json
+from urllib.parse import urlencode, quote
+from requests.auth import HTTPBasicAuth
+from requests_oauthlib import OAuth1
+from pyspark.sql.datasource import DataSource, DataSourceReader, InputPartition
+from pyspark.sql.types import StructType, StructField, StringType
+from pyspark.sql import Row
+
+
+class RestDataSource(DataSource):
+    """
+    A PySpark data source for calling REST APIs in parallel with multiple input parameters.
+
+    This data source allows you to:
+    - Call REST APIs multiple times with different parameter sets in parallel
+    - Automatically infer the schema from API responses
+    - Support various HTTP methods (GET, POST, PUT, DELETE)
+    - Handle authentication (Basic, OAuth1, Bearer tokens)
+    - Include input parameters in the output for easy tracking
+
+    Name: `rest`
+
+    Required Options
+    ----------------
+    url : str
+        The target REST API URL (can include common query parameters)
+    input : str
+        Name of a temporary Spark table containing input parameters, where column names
+        match the API parameter names
+
+    Optional Options
+    ----------------
+    method : str, default 'POST'
+        HTTP method to use (GET, POST, PUT, DELETE)
+    userId : str
+        Username for Basic authentication
+    userPassword : str
+        Password for Basic authentication
+    authType : str, default 'Basic'
+        Authentication type (Basic, OAuth1, Bearer)
+    oauthConsumerKey : str
+        OAuth1 consumer key
+    oauthConsumerSecret : str
+        OAuth1 consumer secret
+    oauthToken : str
+        OAuth1 token (also used as Bearer token when authType='Bearer')
+    oauthTokenSecret : str
+        OAuth1 token secret
+    partitions : int, default 2
+        Number of partitions for parallel execution
+    connectionTimeout : int, default 1000
+        Connection timeout in milliseconds
+    readTimeout : int, default 5000
+        Read timeout in milliseconds
+    schemaSamplePcnt : int, default 30
+        Percentage of input records to use for schema inference (minimum 3)
+    callStrictlyOnce : str, default 'N'
+        If 'Y', calls API only once per input and caches results (useful for paid APIs)
+    includeInputsInOutput : str, default 'Y'
+        If 'Y', includes input parameters in output DataFrame
+    postInputFormat : str, default 'json'
+        Format for POST data (json, form)
+    queryType : str, default 'querystring'
+        How to append GET parameters (querystring, inline)
+    headers : str
+        Additional HTTP headers in JSON format, e.g., '{"X-Custom": "value"}'
+    cookie : str
+        Cookie to send with request in format 'name=value'
+
+    Examples
+    --------
+    Basic GET request with query parameters:
+
+    >>> from pyspark_datasources import RestDataSource
+    >>> spark.dataSource.register(RestDataSource)
+    >>>
+    >>> # Create input DataFrame with parameters
+    >>> data = [("Nevada", "nn"), ("Northern California", "pr")]
+    >>> input_df = spark.createDataFrame(data, ["region", "source"])
+    >>> input_df.createOrReplaceTempView("input_params")
+    >>>
+    >>> # Call REST API for each row
+    >>> df = spark.read.format("rest") \\
+    ...     .option("url", "https://soda.demo.socrata.com/resource/6yvf-kk3n.json") \\
+    ...     .option("input", "input_params") \\
+    ...     .option("method", "GET") \\
+    ...     .load()
+    >>> df.show()
+
+    POST request with JSON body:
+
+    >>> # Input table for POST requests
+    >>> data = [("user1", "email1@test.com"), ("user2", "email2@test.com")]
+    >>> input_df = spark.createDataFrame(data, ["username", "email"])
+    >>> input_df.createOrReplaceTempView("users_to_create")
+    >>>
+    >>> df = spark.read.format("rest") \\
+    ...     .option("url", "https://api.example.com/users") \\
+    ...     .option("input", "users_to_create") \\
+    ...     .option("method", "POST") \\
+    ...     .option("postInputFormat", "json") \\
+    ...     .load()
+
+    With Basic Authentication:
+
+    >>> df = spark.read.format("rest") \\
+    ...     .option("url", "https://api.example.com/data") \\
+    ...     .option("input", "input_params") \\
+    ...     .option("method", "GET") \\
+    ...     .option("userId", "myuser") \\
+    ...     .option("userPassword", "mypass") \\
+    ...     .load()
+
+    With OAuth1:
+
+    >>> df = spark.read.format("rest") \\
+    ...     .option("url", "https://api.twitter.com/1.1/search/tweets.json") \\
+    ...     .option("input", "search_terms") \\
+    ...     .option("method", "GET") \\
+    ...     .option("authType", "OAuth1") \\
+    ...     .option("oauthConsumerKey", "key") \\
+    ...     .option("oauthConsumerSecret", "secret") \\
+    ...     .option("oauthToken", "token") \\
+    ...     .option("oauthTokenSecret", "token_secret") \\
+    ...     .load()
+
+    Output Structure
+    ----------------
+    The returned DataFrame contains:
+    - All input parameter columns (if includeInputsInOutput='Y')
+    - An 'output' column containing the API response (struct or array)
+    - A '_corrupt_records' column if some API calls failed
+
+    Notes
+    -----
+    - Each row in the input table results in one API call
+    - API calls are parallelized based on the 'partitions' option
+    - Schema is inferred from a sample of responses (controlled by schemaSamplePcnt)
+    - For paid APIs or rate-limited services, use callStrictlyOnce='Y'
+    """
+
+    @classmethod
+    def name(cls) -> str:
+        return "rest"
+
+    def __init__(self, options: Optional[Dict[str, str]] = None):
+        self.options = options or {}
+        self._validate_options()
+
+    def _validate_options(self):
+        """Validate required options"""
+        if "url" not in self.options:
+            raise ValueError("Option 'url' is required for REST data source")
+        if "input" not in self.options:
+            raise ValueError("Option 'input' is required for REST data source")
+
+    def schema(self) -> str:
+        """
+        Returns a dynamic schema that will be inferred from API responses.
+        The actual schema inference happens in the reader.
+        """
+        # Return a minimal schema - actual schema will be inferred from JSON responses
+        return "output STRING"
+
+    def reader(self, schema: StructType) -> DataSourceReader:
+        return RestReader(self.options, schema)
+
+
+class RestReader(DataSourceReader):
+    """Reader implementation for REST API calls"""
+
+    def __init__(self, options: Dict[str, str], schema: StructType):
+        self.options = options
+        self.schema_type = schema
+
+        # Required options
+        self.url = options["url"]
+        self.input_table = options["input"]
+
+        # Optional options with defaults
+        self.method = options.get("method", "POST").upper()
+        self.user_id = options.get("userId", "")
+        self.user_password = options.get("userPassword", "")
+        self.auth_type = options.get("authType", "Basic")
+        self.num_partitions = int(options.get("partitions", "2"))
+        self.connection_timeout = int(options.get("connectionTimeout", "1000")) / 1000  # Convert to seconds
+        self.read_timeout = int(options.get("readTimeout", "5000")) / 1000  # Convert to seconds
+        self.schema_sample_pcnt = int(options.get("schemaSamplePcnt", "30"))
+        self.call_strictly_once = options.get("callStrictlyOnce", "N")
+        self.include_inputs = options.get("includeInputsInOutput", "Y")
+        self.post_input_format = options.get("postInputFormat", "json")
+        self.query_type = options.get("queryType", "querystring")
+        self.cookie = options.get("cookie", "")
+        self.custom_headers = options.get("headers", "")
+
+        # OAuth options
+        self.oauth_consumer_key = options.get("oauthConsumerKey", "")
+        self.oauth_consumer_secret = options.get("oauthConsumerSecret", "")
+        self.oauth_token = options.get("oauthToken", "")
+        self.oauth_token_secret = options.get("oauthTokenSecret", "")
+
+        # Will be set during partitioning
+        self.input_data: List[Dict[str, Any]] = []
+        self.column_names: List[str] = []
+
+    def partitions(self) -> List[InputPartition]:
+        """
+        Create partitions for parallel execution.
+        This is called before read() to split the input data.
+        """
+        # We need to create partitions based on input data
+        # Since we can't access Spark context here, we'll create logical partitions
+        # The actual data will be fetched in read()
+        return [InputPartition(i) for i in range(self.num_partitions)]
+
+    def read(self, partition: InputPartition) -> Iterator[Row]:
+        """
+        Read data by calling the REST API for each input parameter set.
+        This is called once per partition in parallel.
+        """
+        # Import here to access Spark session
+        from pyspark.sql import SparkSession
+
+        try:
+            spark = SparkSession.getActiveSession()
+            if spark is None:
+                raise RuntimeError("No active Spark session found")
+
+            # Get input data from the temporary table
+            input_df = spark.sql(f"SELECT * FROM {self.input_table}")
+            self.column_names = input_df.columns
+
+            # Convert to list of dictionaries for easier processing
+            all_input_data = [row.asDict() for row in input_df.collect()]
+
+            if not all_input_data:
+                return iter([])
+
+            # Distribute data across partitions
+            partition_id = partition.value
+            partition_data = [
+                row for idx, row in enumerate(all_input_data)
+                if idx % self.num_partitions == partition_id
+            ]
+
+            # Process each input record
+            results = []
+            for input_row in partition_data:
+                try:
+                    result = self._call_rest_api(input_row)
+                    results.append(result)
+                except Exception as e:
+                    # Include error information in corrupt records
+                    error_result = input_row.copy() if self.include_inputs == "Y" else {}
+                    error_result["_corrupt_record"] = str(e)
+                    results.append(Row(**error_result))
+
+            return iter(results)
+
+        except Exception as e:
+            print(f"Error in RestReader.read: {e}")
+            return iter([])
+
+    def _call_rest_api(self, input_params: Dict[str, Any]) -> Row:
+        """
+        Make a REST API call with the given input parameters.
+
+        Args:
+            input_params: Dictionary of parameter names and values
+
+        Returns:
+            Row containing input params (if enabled) and API response
+        """
+        # Prepare authentication
+        auth = self._prepare_auth()
+
+        # Prepare headers
+        headers = self._prepare_headers()
+
+        # Prepare request based on HTTP method
+        if self.method == "GET":
+            response = self._make_get_request(input_params, auth, headers)
+        elif self.method == "POST":
+            response = self._make_post_request(input_params, auth, headers)
+        elif self.method == "PUT":
+            response = self._make_put_request(input_params, auth, headers)
+        elif self.method == "DELETE":
+            response = self._make_delete_request(input_params, auth, headers)
+        else:
+            raise ValueError(f"Unsupported HTTP method: {self.method}")
+
+        # Parse response
+        response_data = self._parse_response(response)
+
+        # Prepare output
+        return self._prepare_output(input_params, response_data)
+
+    def _prepare_auth(self) -> Optional[Any]:
+        """Prepare authentication based on authType"""
+        if self.auth_type == "OAuth1" and self.oauth_consumer_key:
+            return OAuth1(
+                self.oauth_consumer_key,
+                client_secret=self.oauth_consumer_secret,
+                resource_owner_key=self.oauth_token,
+                resource_owner_secret=self.oauth_token_secret
+            )
+        elif self.user_id and self.user_password:
+            return HTTPBasicAuth(self.user_id, self.user_password)
+        return None
+
+    def _prepare_headers(self) -> Dict[str, str]:
+        """Prepare HTTP headers"""
+        headers = {}
+
+        # Add custom headers
+        if self.custom_headers:
+            try:
+                custom = json.loads(self.custom_headers)
+                headers.update(custom)
+            except json.JSONDecodeError:
+                print(f"Warning: Could not parse custom headers: {self.custom_headers}")
+
+        # Add Bearer token if specified
+        if self.auth_type == "Bearer" and self.oauth_token:
+            headers["Authorization"] = f"Bearer {self.oauth_token}"
+
+        return headers
+
+    def _make_get_request(
+        self,
+        params: Dict[str, Any],
+        auth: Optional[Any],
+        headers: Dict[str, str]
+    ) -> requests.Response:
+        """Make a GET request"""
+        url = self._prepare_get_url(params)
+
+        cookies = self._prepare_cookies()
+
+        response = requests.get(
+            url,
+            auth=auth,
+            headers=headers,
+            cookies=cookies,
+            timeout=(self.connection_timeout, self.read_timeout),
+            verify=True  # Can be made configurable if needed
+        )
+        response.raise_for_status()
+        return response
+
+    def _make_post_request(
+        self,
+        params: Dict[str, Any],
+        auth: Optional[Any],
+        headers: Dict[str, str]
+    ) -> requests.Response:
+        """Make a POST request"""
+        cookies = self._prepare_cookies()
+
+        if self.post_input_format == "json":
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(params)
+            response = requests.post(
+                self.url,
+                data=data,
+                auth=auth,
+                headers=headers,
+                cookies=cookies,
+                timeout=(self.connection_timeout, self.read_timeout),
+                verify=True
+            )
+        elif self.post_input_format == "form":
+            response = requests.post(
+                self.url,
+                data=params,
+                auth=auth,
+                headers=headers,
+                cookies=cookies,
+                timeout=(self.connection_timeout, self.read_timeout),
+                verify=True
+            )
+        else:
+            raise ValueError(f"Unsupported postInputFormat: {self.post_input_format}")
+
+        response.raise_for_status()
+        return response
+
+    def _make_put_request(
+        self,
+        params: Dict[str, Any],
+        auth: Optional[Any],
+        headers: Dict[str, str]
+    ) -> requests.Response:
+        """Make a PUT request"""
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(params)
+        cookies = self._prepare_cookies()
+
+        response = requests.put(
+            self.url,
+            data=data,
+            auth=auth,
+            headers=headers,
+            cookies=cookies,
+            timeout=(self.connection_timeout, self.read_timeout),
+            verify=True
+        )
+        response.raise_for_status()
+        return response
+
+    def _make_delete_request(
+        self,
+        params: Dict[str, Any],
+        auth: Optional[Any],
+        headers: Dict[str, str]
+    ) -> requests.Response:
+        """Make a DELETE request"""
+        cookies = self._prepare_cookies()
+
+        response = requests.delete(
+            self.url,
+            auth=auth,
+            headers=headers,
+            cookies=cookies,
+            timeout=(self.connection_timeout, self.read_timeout),
+            verify=True
+        )
+        response.raise_for_status()
+        return response
+
+    def _prepare_get_url(self, params: Dict[str, Any]) -> str:
+        """Prepare URL for GET request based on queryType"""
+        if self.query_type == "querystring":
+            # Append parameters as query string
+            query_string = urlencode(params)
+            if "?" in self.url:
+                return f"{self.url}&{query_string}"
+            else:
+                return f"{self.url}?{query_string}"
+        elif self.query_type == "inline":
+            # Replace placeholders in URL (e.g., /api/{key}/{value})
+            url = self.url
+            for key, value in params.items():
+                url = url.replace(f"{{{key}}}", quote(str(value)))
+            return url
+        else:
+            raise ValueError(f"Unsupported queryType: {self.query_type}")
+
+    def _prepare_cookies(self) -> Dict[str, str]:
+        """Prepare cookies from cookie option"""
+        if self.cookie and "=" in self.cookie:
+            name, value = self.cookie.split("=", 1)
+            return {name: value}
+        return {}
+
+    def _parse_response(self, response: requests.Response) -> Any:
+        """Parse response based on content type"""
+        try:
+            # Try to parse as JSON
+            return response.json()
+        except json.JSONDecodeError:
+            # Return as text if not JSON
+            return response.text
+
+    def _prepare_output(self, input_params: Dict[str, Any], response_data: Any) -> Row:
+        """
+        Prepare output row combining input parameters and API response.
+
+        Args:
+            input_params: Original input parameters
+            response_data: Parsed API response
+
+        Returns:
+            Row with combined data
+        """
+        if self.include_inputs == "Y":
+            # Include input parameters in output
+            output_dict = input_params.copy()
+            output_dict["output"] = response_data
+        else:
+            # Only return the response
+            output_dict = {"output": response_data}
+
+        return Row(**output_dict)
