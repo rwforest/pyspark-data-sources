@@ -10,7 +10,7 @@ OPTION 1: Run All Tests (Easiest - 3 Commands)
 
 cd /Users/yipman/Downloads/github/pyspark-data-sources
 source test_venv/bin/activate
-python3 test_rest_datasource.py
+python3 tests/test_rest_datasource.py
 
 That's it! You'll see all 7 tests pass.
 
@@ -61,20 +61,20 @@ Already Set Up For You
 Files You Can Use
 ================================================================================
 
-📄 HOW_TO_TEST.md           - Detailed testing guide
-📄 test_rest_datasource.py  - Comprehensive test suite
-📄 RUN_TESTS.sh            - Simple test runner script
-📄 examples/rest_example.py - Example usage code
-📄 TEST_RESULTS.md         - Previous test results
+📄 docs/HOW_TO_TEST.md             - Detailed testing guide
+📄 tests/test_rest_datasource.py  - Comprehensive test suite
+📄 RUN_TESTS.sh                   - Simple test runner script
+📄 examples/rest_example.py        - Example usage code
+📄 docs/TEST_RESULTS.md           - Previous test results
 
 ================================================================================
 For More Information
 ================================================================================
 
-Detailed guide:     cat HOW_TO_TEST.md
-Test results:       cat TEST_RESULTS.md
-Usage examples:     cat QUICK_START_WHEEL.md
-Build info:         cat WHEEL_BUILD_SUMMARY.md
+Detailed guide:     cat docs/HOW_TO_TEST.md
+Test results:       cat docs/TEST_RESULTS.md
+Usage examples:     cat docs/QUICK_START_WHEEL.md
+Build info:         cat docs/WHEEL_BUILD_SUMMARY.md
 
 ================================================================================
 Ready to Go!

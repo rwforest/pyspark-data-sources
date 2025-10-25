@@ -88,6 +88,10 @@ class RestDataSource(DataSource):
         Additional HTTP headers in JSON format, e.g., '{"X-Custom": "value"}'
     cookie : str
         Cookie to send with request in format 'name=value'
+    jsonPath : str
+        Path to extract nested data from JSON response, e.g., 'data' or 'data.items'
+        When specified, extracts array from this path and creates one row per item
+        Automatically infers schema from nested data structure
 
     Examples
     --------
@@ -173,19 +177,75 @@ class RestDataSource(DataSource):
         """Validate required options"""
         if "url" not in self.options:
             raise ValueError("Option 'url' is required for REST data source")
-        if "input" not in self.options and "inputData" not in self.options and "inputCsvPath" not in self.options:
-            raise ValueError("Either 'input' (table name), 'inputData' (serialized JSON), or 'inputCsvPath' (CSV file path) is required for REST data source")
+
+        # For streaming mode, input data is not required (it polls API)
+        is_streaming = self.options.get("streaming", "false").lower() == "true"
+        if not is_streaming:
+            if "input" not in self.options and "inputData" not in self.options and "inputCsvPath" not in self.options:
+                raise ValueError("Either 'input' (table name), 'inputData' (serialized JSON), or 'inputCsvPath' (CSV file path) is required for REST data source")
 
     def schema(self) -> str:
         """
         Returns a dynamic schema that will be inferred from API responses.
         The actual schema inference happens in the reader.
         """
-        # Return a minimal schema - actual schema will be inferred from JSON responses
-        return "output STRING"
+        # Check if we should include input columns in output
+        include_inputs = self.options.get("includeInputsInOutput", "Y")
+
+        if include_inputs == "N":
+            # Only return output column
+            return "output STRING"
+        else:
+            # Need to infer input schema from inputData or inputCsvPath
+            import json
+
+            if "inputData" in self.options:
+                # Parse inputData to get schema
+                try:
+                    input_data = json.loads(self.options["inputData"])
+                    if input_data and len(input_data) > 0:
+                        # Get keys from first record
+                        first_record = input_data[0]
+                        input_columns = ", ".join([f"{key} STRING" for key in first_record.keys()])
+                        return f"{input_columns}, output STRING"
+                except:
+                    pass
+            elif "inputCsvPath" in self.options:
+                # Read CSV header to get column names
+                try:
+                    import csv
+                    with open(self.options["inputCsvPath"], 'r') as f:
+                        reader = csv.DictReader(f)
+                        if reader.fieldnames:
+                            input_columns = ", ".join([f"{col} STRING" for col in reader.fieldnames])
+                            return f"{input_columns}, output STRING"
+                except:
+                    pass
+
+            # Fallback: just return output column
+            return "output STRING"
 
     def reader(self, schema: StructType) -> DataSourceReader:
         return RestReader(self.options, schema)
+
+    def simpleStreamReader(self, schema: StructType):
+        """
+        Return stream reader if streaming mode is enabled.
+
+        This method is called by Spark when using readStream API.
+        Returns None if not in streaming mode (will use batch reader instead).
+
+        Args:
+            schema: The schema for the data source
+
+        Returns:
+            RestStreamReader if streaming=true, None otherwise
+        """
+        is_streaming = self.options.get("streaming", "false").lower() == "true"
+        if is_streaming:
+            from .rest_streaming import RestStreamReader
+            return RestStreamReader(schema, self.options)
+        return None
 
 
 import warnings
@@ -225,6 +285,7 @@ class RestReader(DataSourceReader):
         self.query_type = options.get("queryType", "querystring")
         self.cookie = options.get("cookie", "")
         self.custom_headers = options.get("headers", "")
+        self.json_path = options.get("jsonPath", "")  # Path to extract nested data
 
         # OAuth options
         self.oauth_consumer_key = options.get("oauthConsumerKey", "")
@@ -329,10 +390,53 @@ class RestReader(DataSourceReader):
             for input_row in partition_data:
                 try:
                     result = self._call_rest_api(input_row)
-                    results.append(result)
+
+                    # If jsonPath is specified, extract nested data and explode into multiple rows
+                    if self.json_path:
+                        # Get the output data
+                        output_data = result.asDict().get("output")
+                        if output_data:
+                            # Extract data at jsonPath
+                            extracted_data = self._extract_json_path(output_data, self.json_path)
+
+                            # If extracted data is a list, create one row per item
+                            if isinstance(extracted_data, list):
+                                for item in extracted_data:
+                                    item_dict = input_row.copy() if self.include_inputs == "Y" else {}
+
+                                    # If item is a dict with nested 'data', flatten it
+                                    if isinstance(item, dict) and "data" in item:
+                                        # Flatten the nested 'data' object
+                                        flattened = item.get("data", {})
+                                        if isinstance(flattened, dict):
+                                            item_dict.update(flattened)
+                                        else:
+                                            item_dict["output"] = flattened
+                                    elif isinstance(item, dict):
+                                        # Merge dict fields directly
+                                        item_dict.update(item)
+                                    else:
+                                        # Store as output
+                                        item_dict["output"] = item
+
+                                    results.append(Row(**item_dict))
+                            elif extracted_data is not None:
+                                # Single item, not a list
+                                item_dict = input_row.copy() if self.include_inputs == "Y" else {}
+                                if isinstance(extracted_data, dict):
+                                    item_dict.update(extracted_data)
+                                else:
+                                    item_dict["output"] = extracted_data
+                                results.append(Row(**item_dict))
+                    else:
+                        # No jsonPath - return as-is
+                        results.append(result)
+
                 except Exception as e:
                     # Include error information in corrupt records
+                    # IMPORTANT: Always include "output" field to match schema
                     error_result = input_row.copy() if self.include_inputs == "Y" else {}
+                    error_result["output"] = None  # Must include output field to match schema
                     error_result["_corrupt_record"] = str(e)
                     results.append(Row(**error_result))
 
@@ -554,7 +658,7 @@ class RestReader(DataSourceReader):
             response_data: Parsed API response
 
         Returns:
-            Row with combined data
+            Row with combined data (or multiple rows if jsonPath specified)
         """
         if self.include_inputs == "Y":
             # Include input parameters in output
@@ -565,3 +669,33 @@ class RestReader(DataSourceReader):
             output_dict = {"output": response_data}
 
         return Row(**output_dict)
+
+    def _extract_json_path(self, data: Any, path: str) -> Any:
+        """
+        Extract data from nested JSON using dot notation path.
+
+        Args:
+            data: JSON data (dict or list)
+            path: Dot-separated path like 'data' or 'data.items'
+
+        Returns:
+            Extracted data at the path
+        """
+        if not path:
+            return data
+
+        parts = path.split(".")
+        current = data
+
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, list) and part.isdigit():
+                current = current[int(part)]
+            else:
+                return None
+
+            if current is None:
+                return None
+
+        return current

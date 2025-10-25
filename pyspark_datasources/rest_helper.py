@@ -103,6 +103,127 @@ def rest_api_call(
     return result
 
 
+def flatten_json_response(
+    response_df,
+    json_path: str = "data",
+    flatten_nested_key: str = "data",
+    fully_flatten: bool = True,
+    separator: str = "_"
+):
+    """
+    Flatten nested JSON arrays from API responses into individual rows.
+
+    This helper extracts nested arrays from API responses and creates
+    one row per item. Useful for APIs that return arrays nested inside
+    objects (e.g., {"data": [{...}, {...}]}).
+
+    Args:
+        response_df: DataFrame with 'output' column containing JSON responses
+        json_path: Dot-separated path to extract array from JSON (default: 'data')
+                   e.g., 'data', 'results', 'items.list'
+        flatten_nested_key: If items have this nested key, flatten it (default: 'data')
+                           Set to None to disable nested flattening
+        fully_flatten: If True, recursively flatten all nested dicts into columns (default: True)
+        separator: Separator for nested column names (default: '_')
+
+    Returns:
+        DataFrame with flattened rows (one row per array item)
+
+    Example:
+        >>> # API returns: {"data": [{"data": {"id": 1, "name": {"first": "A"}}}, ...]}
+        >>> response = rest_api_call(input_df, url=api_url, ...)
+        >>> flattened = flatten_json_response(response, json_path="data", fully_flatten=True)
+        >>> flattened.show()  # One row per item with id, name_first columns
+    """
+    import ast
+
+    def _flatten_dict(d, parent_key='', sep='_'):
+        """Recursively flatten a nested dictionary."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict) and v:  # Only flatten non-empty dicts
+                items.extend(_flatten_dict(v, new_key, sep=sep).items())
+            elif isinstance(v, list):
+                # Convert lists to comma-separated strings
+                items.append((new_key, ', '.join(str(x) for x in v) if v else ''))
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    spark = SparkSession.getActiveSession()
+    if spark is None:
+        raise RuntimeError("No active Spark session found")
+
+    # Collect and parse responses
+    all_items = []
+    for row in response_df.collect():
+        row_dict = row.asDict()
+        output = row_dict.get("output")
+
+        if output:
+            # Parse JSON response
+            response_data = ast.literal_eval(output) if isinstance(output, str) else output
+
+            # Extract data at json_path
+            parts = json_path.split(".")
+            current = response_data
+            for part in parts:
+                if isinstance(current, dict):
+                    current = current.get(part, [])
+                else:
+                    current = []
+
+            # Process each item in the extracted array
+            if isinstance(current, list):
+                for item in current:
+                    item_dict = {k: v for k, v in row_dict.items() if k != "output"}
+
+                    # Flatten nested key if specified and present
+                    if flatten_nested_key and isinstance(item, dict) and flatten_nested_key in item:
+                        nested_data = item.get(flatten_nested_key, {})
+                        if isinstance(nested_data, dict):
+                            if fully_flatten:
+                                # Recursively flatten all nested dictionaries
+                                flattened = _flatten_dict(nested_data, sep=separator)
+                                item_dict.update(flattened)
+                            else:
+                                # Merge nested fields into the item (old behavior)
+                                for key, value in nested_data.items():
+                                    if isinstance(value, (dict, list)):
+                                        item_dict[key] = str(value)
+                                    else:
+                                        item_dict[key] = value
+                        else:
+                            item_dict[flatten_nested_key] = nested_data
+                    elif isinstance(item, dict):
+                        # No nested key or not found - just flatten the dict directly
+                        if fully_flatten:
+                            # Recursively flatten all nested dictionaries
+                            flattened = _flatten_dict(item, sep=separator)
+                            item_dict.update(flattened)
+                        else:
+                            # Old behavior - convert complex types to strings
+                            for key, value in item.items():
+                                if isinstance(value, (dict, list)):
+                                    item_dict[key] = str(value)
+                                else:
+                                    item_dict[key] = value
+                    else:
+                        # Not a dict - store as value
+                        item_dict["value"] = item
+
+                    all_items.append(item_dict)
+
+    # Create DataFrame from flattened items
+    if all_items:
+        return spark.createDataFrame(all_items)
+    else:
+        # Return empty DataFrame with at least the input columns
+        from pyspark.sql.types import StructType
+        return spark.createDataFrame([], StructType([]))
+
+
 def rest_api_call_csv(
     input_df: DataFrame,
     url: str,

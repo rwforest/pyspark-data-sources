@@ -55,7 +55,7 @@ echo "=============================================="
 echo ""
 
 # Run the tests
-python3 test_rest_datasource.py
+python3 tests/test_rest_datasource.py
 
 echo ""
 echo "=============================================="

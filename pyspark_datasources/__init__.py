@@ -6,7 +6,8 @@ from .huggingface import HuggingFaceDatasets
 from .kaggle import KaggleDataSource
 from .opensky import OpenSkyDataSource
 from .rest import RestDataSource
-from .rest_helper import rest_api_call, rest_api_call_csv
+from .rest_helper import rest_api_call, rest_api_call_csv, flatten_json_response
+from .rest_streaming import RestStreamReader
 from .robinhood import RobinhoodDataSource
 from .salesforce import SalesforceDataSource
 from .simplejson import SimpleJsonDataSource
