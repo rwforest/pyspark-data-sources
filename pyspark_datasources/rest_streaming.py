@@ -67,7 +67,7 @@ class RestStreamReader(SimpleDataSourceStreamReader):
         self.offset_type = options.get("offsetType", "timestamp")
         self.initial_offset_value = options.get("initialOffset", "0")
         self.batch_size = int(options.get("batchSize", "1000"))
-        self.data_field = options.get("dataField", "data")  # Field containing array of records
+        self.data_field = options.get("dataField", "")  # Field containing array of records
 
         # Query and format options
         self.query_type = options.get("queryType", "querystring")
