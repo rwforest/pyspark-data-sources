@@ -147,21 +147,32 @@ class RestStreamReader(SimpleDataSourceStreamReader):
 
     def _prepare_url_with_offset(self, offset_value: str) -> str:
         """
-        Prepare URL with offset value replaced.
+        Prepare URL with offset value and input field values replaced.
 
         Supports placeholders like:
         - https://api.example.com/data?since={timestamp}
         - https://api.example.com/data?cursor={next_cursor}
         - https://api.example.com/data?start_id={max_id}
+        - https://api.example.com/data?lamin={lamin}&lamax={lamax}
 
         Args:
             offset_value: The current offset value to use
 
         Returns:
-            URL with offset placeholder replaced
+            URL with placeholders replaced
         """
+        # Start with the base URL
+        url = self.url
+
         # Replace offset placeholder in URL
-        url = self.url.replace(f"{{{self.offset_field}}}", quote(str(offset_value)))
+        url = url.replace(f"{{{self.offset_field}}}", quote(str(offset_value)))
+
+        # Replace input field placeholders from inputData
+        for field_name, field_value in self.input_fields.items():
+            placeholder = f"{{{field_name}}}"
+            if placeholder in url:
+                url = url.replace(placeholder, quote(str(field_value)))
+
         return url
 
     def _call_api(self, url: str) -> requests.Response:
@@ -363,6 +374,23 @@ class RestStreamReader(SimpleDataSourceStreamReader):
             # Parse response
             response_data = self._parse_response(response)
 
+            # Check if dataField is empty string - this means return whole response as JSON string
+            if self.data_field == "":
+                # Return the whole response as a single record with JSON string in output field
+                row_values = []
+                for field_name, field_value in self.input_fields.items():
+                    row_values.append(field_value)
+                # Serialize the entire response as JSON string
+                row_values.append(json.dumps(response_data))
+                rows = [tuple(row_values)]
+
+                # Extract next offset from response
+                next_offset_value = self._extract_next_offset(response_data, [response_data])
+                next_offset = {self.offset_field: next_offset_value}
+
+                return (rows, next_offset)
+
+            # Normal mode: extract individual records
             # Extract records
             records = self._extract_records(response_data)
 
