@@ -3,10 +3,20 @@ from typing import List
 from pyspark.sql.datasource import (
     DataSource,
     DataSourceReader,
-    DataSourceStreamReader,
     InputPartition,
 )
 from pyspark.sql.types import StringType, StructType
+
+# Try to import streaming support (PySpark 3.5.0+)
+try:
+    from pyspark.sql.datasource import DataSourceStreamReader
+except ImportError:
+    # Streaming not available, use SimpleDataSourceStreamReader if available
+    try:
+        from pyspark.sql.datasource import SimpleDataSourceStreamReader as DataSourceStreamReader
+    except ImportError:
+        # No streaming support at all
+        DataSourceStreamReader = None
 
 
 def _validate_faker_schema(schema):

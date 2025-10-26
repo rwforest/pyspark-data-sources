@@ -73,6 +73,17 @@ class RestStreamReader(SimpleDataSourceStreamReader):
         self.query_type = options.get("queryType", "querystring")
         self.post_input_format = options.get("postInputFormat", "json")
 
+        # Parse input data to get input fields (for includeInputsInOutput)
+        self.input_fields = {}
+        if "inputData" in options:
+            try:
+                input_data = json.loads(options["inputData"])
+                if input_data and len(input_data) > 0:
+                    # Use first record as template for input fields
+                    self.input_fields = input_data[0]
+            except json.JSONDecodeError:
+                pass
+
         # State tracking
         self.last_request_time = 0
 
@@ -299,8 +310,11 @@ class RestStreamReader(SimpleDataSourceStreamReader):
         """
         Convert record dictionaries to tuples for Spark rows.
 
-        For now, we return the entire record as a single "output" field
-        to maintain consistency with the batch REST data source.
+        The schema includes input fields (from inputData) followed by the output field.
+        For example, if inputData is [{"placeholder": "dummy"}], the schema is:
+        "placeholder STRING, output STRING"
+
+        So we need to return tuples with (input_field_values..., output_value)
 
         Args:
             records: List of record dictionaries
@@ -310,8 +324,17 @@ class RestStreamReader(SimpleDataSourceStreamReader):
         """
         rows = []
         for record in records[:self.batch_size]:
-            # Return as single output field (consistent with batch mode)
-            rows.append((record,))
+            # Build row tuple: (input_field1, input_field2, ..., output)
+            row_values = []
+
+            # Add input field values in the order they appear in schema
+            for field_name, field_value in self.input_fields.items():
+                row_values.append(field_value)
+
+            # Add output field (the API response record)
+            row_values.append(record)
+
+            rows.append(tuple(row_values))
         return rows
 
     def read(self, start: Dict[str, str]) -> Tuple[List[Tuple], Dict[str, str]]:

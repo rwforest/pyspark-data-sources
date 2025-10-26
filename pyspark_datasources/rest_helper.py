@@ -224,6 +224,201 @@ def flatten_json_response(
         return spark.createDataFrame([], StructType([]))
 
 
+def parse_array_response(
+    response_df,
+    array_path: str = "states",
+    column_names: list = None,
+    timestamp_field: str = "time"
+):
+    """
+    Parse API responses that return arrays instead of objects (e.g., OpenSky Network).
+
+    Some APIs return data as positional arrays instead of named objects:
+    {"time": 123, "states": [["val1", "val2", ...], ...]}
+
+    This helper converts those arrays into a proper DataFrame with named columns.
+
+    Args:
+        response_df: DataFrame with 'output' column containing JSON responses
+        array_path: Path to the array field in the response (default: 'states')
+        column_names: List of column names for the array elements
+        timestamp_field: Name of timestamp field in response (default: 'time')
+
+    Returns:
+        DataFrame with parsed rows and named columns
+
+    Example:
+        >>> # OpenSky returns: {"time": 123, "states": [["icao", "call", ...], ...]}
+        >>> column_names = ["icao24", "callsign", "country", "longitude", "latitude", ...]
+        >>> flights_df = parse_array_response(
+        ...     response_df,
+        ...     array_path="states",
+        ...     column_names=column_names
+        ... )
+    """
+    import ast
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType
+
+    spark = SparkSession.getActiveSession()
+    if spark is None:
+        raise RuntimeError("No active Spark session found")
+
+    if column_names is None:
+        raise ValueError("column_names must be provided for array parsing")
+
+    all_items = []
+    input_columns = set()
+
+    for row in response_df.collect():
+        row_dict = row.asDict()
+        output = row_dict.get("output")
+
+        # Track input columns
+        input_columns.update(k for k in row_dict.keys() if k != "output")
+
+        if output:
+            # Parse JSON response
+            response_data = ast.literal_eval(output) if isinstance(output, str) else output
+
+            # Extract timestamp if present
+            timestamp = response_data.get(timestamp_field) if timestamp_field else None
+
+            # Extract array data
+            array_data = response_data.get(array_path, [])
+
+            # Convert each array to a Row
+            for item_array in array_data:
+                if item_array and len(item_array) > 0:
+                    # Start with input columns (excluding 'output')
+                    row_values = {k: v for k, v in row_dict.items() if k != "output"}
+
+                    # Add timestamp if present
+                    if timestamp:
+                        row_values[timestamp_field] = int(timestamp)
+
+                    # Map array values to column names
+                    for i, col_name in enumerate(column_names):
+                        if i < len(item_array):
+                            value = item_array[i]
+                            # Store all values as-is, let schema handle conversion
+                            row_values[col_name] = value
+                        else:
+                            row_values[col_name] = None
+
+                    all_items.append(row_values)
+
+    # Create DataFrame with explicit schema to avoid inference issues
+    if all_items:
+        # Build schema
+        schema_fields = []
+
+        # Add input column fields
+        for col in sorted(input_columns):
+            schema_fields.append(StructField(col, StringType(), True))
+
+        # Add timestamp field
+        if timestamp_field:
+            schema_fields.append(StructField(timestamp_field, LongType(), True))
+
+        # Add data column fields (all as string to avoid type issues)
+        for col_name in column_names:
+            schema_fields.append(StructField(col_name, StringType(), True))
+
+        schema = StructType(schema_fields)
+
+        # Convert all values to strings for schema consistency
+        rows_for_df = []
+        for item in all_items:
+            row_data = {}
+            for field in schema.fields:
+                value = item.get(field.name)
+                if value is None:
+                    row_data[field.name] = None
+                elif field.dataType == LongType():
+                    row_data[field.name] = int(value) if value is not None else None
+                else:
+                    row_data[field.name] = str(value) if value is not None else None
+            rows_for_df.append(row_data)
+
+        return spark.createDataFrame(rows_for_df, schema)
+    else:
+        return spark.createDataFrame([], StructType([]))
+
+
+def parse_array_response_streaming(
+    stream_df,
+    array_path: str = "states",
+    column_names: list = None,
+    timestamp_field: str = "time",
+    output_column: str = "output"
+):
+    """
+    Parse streaming API responses that return arrays instead of objects.
+
+    This is the streaming version of parse_array_response() that uses Spark SQL
+    transformations instead of .collect(), making it compatible with streaming DataFrames.
+
+    Args:
+        stream_df: Streaming DataFrame with output column containing JSON responses
+        array_path: Path to the array field in the response (default: 'states')
+        column_names: List of column names for the array elements
+        timestamp_field: Name of timestamp field in response (default: 'time')
+        output_column: Name of the output column (default: 'output')
+
+    Returns:
+        Streaming DataFrame with parsed rows and named columns
+
+    Example:
+        >>> # OpenSky streaming: {"time": 123, "states": [["icao", "call", ...], ...]}
+        >>> column_names = ["icao24", "callsign", "country", "longitude", "latitude", ...]
+        >>> flights_df = parse_array_response_streaming(
+        ...     stream_df,
+        ...     array_path="states",
+        ...     column_names=column_names
+        ... )
+        >>> query = flights_df.writeStream.format("console").start()
+    """
+    from pyspark.sql.functions import col, from_json, explode
+    from pyspark.sql.types import StructType, StructField, StringType, LongType, ArrayType
+
+    if column_names is None:
+        raise ValueError("column_names must be provided for array parsing")
+
+    # Define schema for the JSON response
+    # Inner array: array of strings (positional data)
+    inner_array_schema = ArrayType(StringType())
+
+    # Outer structure: {timestamp_field: long, array_path: array<array<string>>}
+    response_schema = StructType([
+        StructField(timestamp_field, LongType(), True),
+        StructField(array_path, ArrayType(inner_array_schema), True)
+    ])
+
+    # Parse JSON and explode arrays
+    parsed_df = stream_df \
+        .select(
+            col("*"),
+            from_json(col(output_column), response_schema).alias("parsed")
+        ) \
+        .select(
+            col("*"),
+            col(f"parsed.{timestamp_field}").alias(timestamp_field),
+            explode(col(f"parsed.{array_path}")).alias("array_item")
+        ) \
+        .drop(output_column, "parsed")
+
+    # Extract individual columns from the array using positional indexing
+    select_exprs = [col(c) for c in parsed_df.columns if c not in [timestamp_field, "array_item"]]
+    select_exprs.append(col(timestamp_field))
+
+    for i, col_name in enumerate(column_names):
+        select_exprs.append(col("array_item")[i].alias(col_name))
+
+    result_df = parsed_df.select(*select_exprs)
+
+    return result_df
+
+
 def rest_api_call_csv(
     input_df: DataFrame,
     url: str,

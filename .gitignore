@@ -165,3 +165,13 @@ claude_cache/
 
 # Gemini
 .gemini/
+
+# Spark output directories
+output/
+checkpoint/
+spark-warehouse/
+derby.log
+metastore_db/
+
+# Mac
+.DS_Store
