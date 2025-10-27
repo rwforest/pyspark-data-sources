@@ -228,7 +228,7 @@ class RestDataSource(DataSource):
     def reader(self, schema: StructType) -> DataSourceReader:
         return RestReader(self.options, schema)
 
-    def simpleStreamReader(self, schema: StructType):
+    def streamReader(self, schema: StructType):
         """
         Return stream reader if streaming mode is enabled.
 
